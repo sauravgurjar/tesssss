@@ -337,8 +337,8 @@ function FileUpload() {
   const [jobStatus, setJobStatus] = useState(null);
   const [docLogs, setDocLogs] = useState("");
   const [fileURL, setFileURL] = useState(null);
-  const [qnaJobStatus, setQnaJobStatus] = useState(null);
-  const [qnaDocLogs, setQnaDocLogs] = useState("");
+  const [qnaJobStatus, setQnaJobStatus] = useState(null); // "running" | "ended" | "failed"
+  const [qnaStats, setQnaStats] = useState(null); // { processed, success, failed, duplicate, message }
 
   const pollingActiveRef = useRef(false);
   const pollingIntervalRef = useRef(null);
@@ -381,8 +381,8 @@ function FileUpload() {
   };
 
   const stopQnaPolling = () => {
-    clearInterval(qnaPollingIntervalRef.current);
-    clearTimeout(qnaPollingTimeoutRef.current);
+    clearTimeout(qnaPollingIntervalRef.current); // setTimeout-based recursive poll
+    clearTimeout(qnaPollingTimeoutRef.current);  // hard timeout
     qnaPollingIntervalRef.current = null;
     qnaPollingTimeoutRef.current = null;
     qnaPollingActiveRef.current = false;
@@ -562,9 +562,10 @@ function FileUpload() {
     if (qnaPollingActiveRef.current) return;
     qnaPollingActiveRef.current = true;
 
-    qnaPollingIntervalRef.current = setInterval(async () => {
+    const poll = async () => {
+      if (!qnaPollingActiveRef.current) return;
       try {
-        const response = await fetch(
+        const res = await fetch(
           `${BASE_URL_GEN_AGENTIC_SEARCH}/jobs/status_poll_faq?job_id=${jId}&department=${encodeURIComponent(department)}&total_record=${totalRecord}`,
           {
             method: "GET",
@@ -575,30 +576,38 @@ function FileUpload() {
             },
           }
         );
-        const data = await response.json();
-        const newStatus = data?.documents?.[0]?.doc_processing_status || data?.job_status;
-        const logs = data?.documents?.[0]?.doc_logs || "";
+        const data = await res.json();
 
-        if (newStatus !== prevQnaStatusRef.current) {
-          setQnaJobStatus(newStatus);
-          setQnaDocLogs(logs);
-          if (newStatus === "failed") {
-            stopQnaPolling();
-            setIsQnaSubmitted(false);
-          } else if (newStatus === "ended" || data?.job_status === "ended") {
-            stopQnaPolling();
-            setIsQnaSubmitted(false);
-            setTimeout(() => { setQnaJobStatus(null); setQnaDocLogs(""); }, 5000);
-          }
+        // Always update counts — they change on every poll while in progress
+        setQnaStats({
+          message: data?.message || "",
+          processed: data?.processed_count ?? 0,
+          success: data?.success_count ?? 0,
+          failed: data?.failed_count ?? 0,
+          duplicate: data?.duplicate_count ?? 0,
+        });
+
+        if (data?.is_completed === true) {
+          // Done — stop, mark ended, no more polls
+          setQnaJobStatus("ended");
+          setIsQnaSubmitted(false);
+          stopQnaPolling();
+        } else {
+          // Still processing — schedule next poll in 15s
+          setQnaJobStatus("running");
+          qnaPollingIntervalRef.current = setTimeout(poll, 15000);
         }
-        prevQnaStatusRef.current = newStatus;
       } catch {
         setQnaJobStatus("failed");
         setIsQnaSubmitted(false);
         stopQnaPolling();
       }
-    }, 15000);
+    };
 
+    // First poll fires immediately on submit
+    poll();
+
+    // Hard timeout: 10 min
     qnaPollingTimeoutRef.current = setTimeout(() => {
       if (qnaPollingActiveRef.current) {
         setQnaJobStatus("failed");
@@ -1028,9 +1037,9 @@ function FileUpload() {
             <StatusBanner
               jobId={qnaJobId}
               status={qnaJobStatus}
-              docLogs={qnaDocLogs}
+              docLogs={qnaStats?.message || ""}
               configFn={getQnaStatusConfig}
-              onClose={() => { setQnaJobStatus(null); setQnaDocLogs(""); setIsQnaSubmitted(false); }}
+              onClose={() => { setQnaJobStatus(null); setQnaStats(null); setIsQnaSubmitted(false); }}
             />
 
             <Box
@@ -1140,15 +1149,16 @@ function FileUpload() {
                 </SectionCard>
 
                 {qnaJobId && (
-                  <SectionCard title="QnA Job Status" accent="#3b82f6">
-                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1 }}>
+                  <SectionCard title="QnA Processing Status" accent="#3b82f6">
+                    {/* Job ID + status row */}
+                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1.5 }}>
                       <Typography sx={{ fontSize: 12, color: "#6b7280" }}>Job ID</Typography>
-                      <Typography sx={{ fontSize: 12, fontFamily: "monospace", color: "#111827" }}>{qnaJobId}</Typography>
+                      <Typography sx={{ fontSize: 11, fontFamily: "monospace", color: "#374151" }}>{qnaJobId}</Typography>
                     </Box>
-                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2 }}>
                       <Typography sx={{ fontSize: 12, color: "#6b7280" }}>Status</Typography>
                       <Chip
-                        label={qnaJobStatus || "pending"}
+                        label={qnaJobStatus === "ended" ? "Completed" : qnaJobStatus === "running" ? "In Progress" : qnaJobStatus === "failed" ? "Failed" : "Pending"}
                         size="small"
                         sx={{
                           fontSize: 11, fontWeight: 600, borderRadius: "6px",
@@ -1163,6 +1173,57 @@ function FileUpload() {
                         }}
                       />
                     </Box>
+
+                    {/* Progress bar while running */}
+                    {qnaJobStatus === "running" && (
+                      <LinearProgress
+                        variant="indeterminate"
+                        sx={{ height: 4, borderRadius: 4, mb: 2, bgcolor: "#dbeafe", "& .MuiLinearProgress-bar": { bgcolor: "#3b82f6" } }}
+                      />
+                    )}
+
+                    {/* Stats grid — shown whenever we have data */}
+                    {qnaStats && (
+                      <Box>
+                        {qnaStats.message && (
+                          <Typography sx={{ fontSize: 12, color: "#6b7280", mb: 1.5, fontStyle: "italic" }}>
+                            {qnaStats.message}
+                          </Typography>
+                        )}
+                        <Box
+                          sx={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr 1fr",
+                            gap: 1,
+                          }}
+                        >
+                          {[
+                            { label: "Processed", value: qnaStats.processed, color: "#3b82f6", bg: "#eff6ff" },
+                            { label: "Success", value: qnaStats.success, color: "#10b981", bg: "#f0fdf4" },
+                            { label: "Failed", value: qnaStats.failed, color: "#ef4444", bg: "#fef2f2" },
+                            { label: "Duplicate", value: qnaStats.duplicate, color: "#f59e0b", bg: "#fffbeb" },
+                          ].map(({ label, value, color, bg }) => (
+                            <Box
+                              key={label}
+                              sx={{
+                                p: 1.2,
+                                borderRadius: "8px",
+                                bgcolor: bg,
+                                border: `1px solid ${color}22`,
+                                textAlign: "center",
+                              }}
+                            >
+                              <Typography sx={{ fontSize: 18, fontWeight: 700, color, lineHeight: 1.2 }}>
+                                {value}
+                              </Typography>
+                              <Typography sx={{ fontSize: 11, color: "#6b7280", mt: 0.3 }}>
+                                {label}
+                              </Typography>
+                            </Box>
+                          ))}
+                        </Box>
+                      </Box>
+                    )}
                   </SectionCard>
                 )}
 
